@@ -21,14 +21,19 @@ import (
 	"testDockerTgbot/rebot"
 )
 
+type groupTarget struct {
+	name   string
+	chatID int64
+}
+
 func Run(conf rebot.Conf) error {
 	if conf.Monitor.ApiID == 0 || conf.Monitor.ApiHash == "" {
 		return errors.New("请在 config.yaml 的 monitor 段填写 apiId 和 apiHash（https://my.telegram.org/apps）")
 	}
 
-	groupName := strings.TrimSpace(conf.Monitor.GroupName)
-	if groupName == "" && conf.Monitor.GroupChatID == 0 {
-		return errors.New("请在 config.yaml 的 monitor 段填写 groupName 或 groupChatId")
+	groups := conf.MonitorGroups()
+	if len(groups) == 0 {
+		return errors.New("请在 config.yaml 的 monitor 段填写 groups，或 groupName / groupChatId")
 	}
 
 	taskFile := rebot.ResolveTaskFilePath(conf.TaskFilePath())
@@ -47,9 +52,13 @@ func Run(conf rebot.Conf) error {
 	defer log.Sync() //nolint:errcheck
 
 	tdLog := logzap.New(log)
+	for _, g := range groups {
+		log.Info("监听群",
+			zap.String("groupName", g.Name),
+			zap.Int64("groupChatId", g.ChatID),
+		)
+	}
 	log.Info("监听配置",
-		zap.String("groupName", groupName),
-		zap.Int64("groupChatId", conf.Monitor.GroupChatID),
 		zap.String("taskFile", taskFile),
 		zap.String("session", sessionPath),
 	)
@@ -69,14 +78,15 @@ func Run(conf rebot.Conf) error {
 		UpdateHandler:  gaps,
 	})
 
-	targetChatID := conf.Monitor.GroupChatID
+	var targets []groupTarget
 
 	handleMessage := func(ctx context.Context, entities tg.Entities, msg tg.MessageClass) error {
 		m, ok := msg.(*tg.Message)
 		if !ok {
 			return nil
 		}
-		if !matchesTargetGroup(entities, m.PeerID, groupName, targetChatID) {
+		groupName, matched := matchesAnyTarget(entities, m.PeerID, targets)
+		if !matched {
 			return nil
 		}
 
@@ -86,7 +96,7 @@ func Run(conf rebot.Conf) error {
 		}
 
 		senderName := formatSender(entities, m)
-		if err := rebot.AppendTaskMessage(taskFile, senderName, text); err != nil {
+		if err := rebot.AppendTaskGroupMessage(taskFile, groupName, senderName, text); err != nil {
 			log.Error("写入工作任务文件失败", zap.Error(err))
 			return nil
 		}
@@ -113,20 +123,19 @@ func Run(conf rebot.Conf) error {
 			return errors.Wrap(err, "get self")
 		}
 
-		if groupName != "" && targetChatID == 0 {
-			id, err := findGroupChatIDByTitle(ctx, client.API(), groupName)
-			if err != nil {
-				return errors.Wrap(err, "find group by name")
-			}
-			targetChatID = id
-			log.Info("已解析群聊 ID", zap.String("groupName", groupName), zap.Int64("groupChatId", targetChatID))
+		targets, err = resolveGroupTargets(ctx, client.API(), groups)
+		if err != nil {
+			return err
+		}
+		for _, t := range targets {
+			log.Info("已解析监听群", zap.String("groupName", t.name), zap.Int64("groupChatId", t.chatID))
 		}
 
 		name := self.FirstName
 		if self.Username != "" {
 			name = fmt.Sprintf("%s (@%s)", name, self.Username)
 		}
-		log.Info("个人账号已登录，开始监听群消息", zap.String("user", name), zap.String("group", groupName))
+		log.Info("个人账号已登录，开始监听群消息", zap.String("user", name), zap.Int("groupCount", len(targets)))
 
 		return gaps.Run(ctx, client.API(), self.ID, updates.AuthOptions{
 			OnStart: func(ctx context.Context) {
@@ -136,21 +145,55 @@ func Run(conf rebot.Conf) error {
 	})
 }
 
-func findGroupChatIDByTitle(ctx context.Context, api *tg.Client, title string) (int64, error) {
-	result, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
-		OffsetPeer: &tg.InputPeerEmpty{},
-		Limit:      100,
-	})
-	if err != nil {
-		return 0, err
+func resolveGroupTargets(ctx context.Context, api *tg.Client, groups []rebot.MonitorGroup) ([]groupTarget, error) {
+	needLookup := false
+	for _, g := range groups {
+		if g.ChatID == 0 && strings.TrimSpace(g.Name) != "" {
+			needLookup = true
+			break
+		}
 	}
 
-	modified, ok := result.AsModified()
-	if !ok {
-		return 0, errors.Errorf("未找到名为 %q 的群，请确认个人账号已加入该群", title)
+	var chats []tg.ChatClass
+	if needLookup {
+		result, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
+			OffsetPeer: &tg.InputPeerEmpty{},
+			Limit:      100,
+		})
+		if err != nil {
+			return nil, errors.Wrap(err, "get dialogs")
+		}
+		modified, ok := result.AsModified()
+		if !ok {
+			return nil, errors.New("无法获取会话列表")
+		}
+		chats = modified.GetChats()
 	}
 
-	for _, chat := range modified.GetChats() {
+	targets := make([]groupTarget, 0, len(groups))
+	for _, g := range groups {
+		name := strings.TrimSpace(g.Name)
+		chatID := g.ChatID
+		if chatID == 0 {
+			if name == "" {
+				return nil, errors.New("监听群需填写 name 或 chatId")
+			}
+			id, err := findGroupChatIDInChats(chats, name)
+			if err != nil {
+				return nil, err
+			}
+			chatID = id
+		}
+		if name == "" {
+			name = fmt.Sprintf("chat:%d", chatID)
+		}
+		targets = append(targets, groupTarget{name: name, chatID: chatID})
+	}
+	return targets, nil
+}
+
+func findGroupChatIDInChats(chats []tg.ChatClass, title string) (int64, error) {
+	for _, chat := range chats {
 		switch c := chat.(type) {
 		case *tg.Chat:
 			if strings.EqualFold(c.Title, title) {
@@ -162,8 +205,16 @@ func findGroupChatIDByTitle(ctx context.Context, api *tg.Client, title string) (
 			}
 		}
 	}
-
 	return 0, errors.Errorf("未找到名为 %q 的群，请确认个人账号已加入该群", title)
+}
+
+func matchesAnyTarget(entities tg.Entities, peer tg.PeerClass, targets []groupTarget) (string, bool) {
+	for _, t := range targets {
+		if matchesTargetGroup(entities, peer, t.name, t.chatID) {
+			return t.name, true
+		}
+	}
+	return "", false
 }
 
 func formatSender(entities tg.Entities, m *tg.Message) string {

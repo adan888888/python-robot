@@ -27,6 +27,10 @@ func ResolveTaskFilePath(configured string) string {
 }
 
 func AppendTaskMessage(filePath, sender, text string) error {
+	return AppendTaskGroupMessage(filePath, "", sender, text)
+}
+
+func AppendTaskGroupMessage(filePath, group, sender, text string) error {
 	if text == "" {
 		return nil
 	}
@@ -42,7 +46,13 @@ func AppendTaskMessage(filePath, sender, text string) error {
 	}
 	defer f.Close()
 
-	line := fmt.Sprintf("[%s] %s: %s\n", time.Now().Format("2006-01-02 15:04:05"), sender, text)
+	ts := time.Now().Format("2006-01-02 15:04:05")
+	var line string
+	if group != "" {
+		line = fmt.Sprintf("[%s] [%s] %s: %s\n", ts, group, sender, text)
+	} else {
+		line = fmt.Sprintf("[%s] %s: %s\n", ts, sender, text)
+	}
 	if _, err := f.WriteString(line); err != nil {
 		return fmt.Errorf("write task file: %w", err)
 	}

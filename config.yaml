@@ -3,7 +3,6 @@ system:
 
 tgbot:
   Token: "8779053439:AAFq2hRopsKd9qcpfnXkiF9dD_ibZJ_MifU"
-  chatID: -5402299032          # my_name_hello 群
   botUsername: "statistics999999_bot"   # https://t.me/statistics999999_bot
   taskFile: ""                    # 留空则写入 ~/Documents/工作任务.txt；Docker 部署见 docker-compose.yml
 
@@ -13,8 +12,10 @@ monitor:
   enabled: true                   # 本地开发 true；Docker 部署建议 false（需终端登录个人账号）
   apiId: 32704558
   apiHash: "ec8da99c65404ac737b582ee2cd9e440"
-  groupName: "my_name_hello"      # 要监听的群名称
-  groupChatId: -5402299032       # my_name_hello 群
+  groups:
+    - name: "my_name_hello"
+      chatId: -5402299032
+    - name: "CG技术App开发组"     # 未填 chatId 时启动按群名自动解析
   taskFile: ""                    # 留空则与 tgbot.taskFile 相同
   session: "monitor/session.json"
   phone: ""                       # 可选，首次登录用的手机号（含国际区号）

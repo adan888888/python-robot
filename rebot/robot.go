@@ -113,8 +113,7 @@ func TgRobot(config Conf) {
 			//if strings.HasPrefix(update.Message.Text, "@bx_xia_Bot") {
 			// 回复消息
 			responseText := "你提到我了吗？我在这里！大佬请指教！"
-			//msg := tgbotapi.NewMessage(update.Message.Chat.ID, responseText)
-			msg := tgbotapi.NewMessage(config.TgBot.ChatID, responseText)
+			msg := tgbotapi.NewMessage(update.Message.Chat.ID, responseText)
 			switch update.Message.Command() {
 			case "start":
 				msg.Text = "你好，发送 /help 查看可用命令"
@@ -133,7 +132,7 @@ func TgRobot(config Conf) {
 		} else {
 			//如果是#号开头，就是我要发到群里的消息
 			if update.Message != nil && strings.HasPrefix(update.Message.Text, "#") {
-				msg := tgbotapi.NewMessage(config.TgBot.ChatID, update.Message.Text)
+				msg := tgbotapi.NewMessage(update.Message.Chat.ID, update.Message.Text)
 				sendBotMessage(bot, taskFile, bot.Self.UserName, msg)
 			}
 		}
