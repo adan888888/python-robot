@@ -9,5 +9,8 @@ services:
     container_name: tgbot # 指定容器名称
     volumes:
       - /etc/localtime:/etc/localtime:ro  # 挂载主机的时间配置文件
+      - ~/Documents:/data/documents
+    environment:
+      - TASK_FILE=/data/documents/工作任务.txt
     ports:
       - "5000:5000"

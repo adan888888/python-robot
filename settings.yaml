@@ -1,9 +1,0 @@
-system:
-  name: "配置文件里面的name1123"
-
-tgbot:
-  Token: "7384710909:AAEGcRFtwuMnoqaCOLA_vRvDE2zcN7ISblI"
-  chatID: -4102331731     # app群chatID: -4102331731   测试Rebot群 ：-1002421880670
-  hour: 18                   # 晚上18点
-  min: 39                   # 39分
-  sec: 20                    #秒

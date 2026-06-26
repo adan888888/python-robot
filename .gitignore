@@ -1,0 +1,4 @@
+monitor/.venv/
+monitor/session.json
+monitor/*.session-journal
+config.yaml

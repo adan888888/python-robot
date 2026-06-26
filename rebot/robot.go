@@ -2,11 +2,11 @@ package rebot
 
 import (
 	"fmt"
+	"os"
+	"strings"
+
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	log "github.com/sirupsen/logrus"
-	"strconv"
-	"strings"
-	"time"
 )
 
 func TgRobot(config Conf) {
@@ -16,12 +16,17 @@ func TgRobot(config Conf) {
 	}
 	//bot.Debug = true
 
-	msg := tgbotapi.NewMessage(config.TgBot.ChatID, "大佬们好，我是下班倒计时机器人")
-	//发送消息
-	//_, err = bot.Send(msg)
-	//if err != nil {
-	//	panic(err)
-	//}
+	expectedBotUsername := strings.TrimPrefix(strings.TrimSpace(config.TgBot.BotUsername), "@")
+	if expectedBotUsername != "" && !strings.EqualFold(bot.Self.UserName, expectedBotUsername) {
+		log.Warnf("配置 botUsername=%s 与当前 Token 对应机器人 @%s 不一致，请确认 config.yaml 中的 Token", expectedBotUsername, bot.Self.UserName)
+	}
+
+	taskFile := strings.TrimSpace(config.TgBot.TaskFilePath)
+	if taskFile == "" {
+		taskFile = strings.TrimSpace(os.Getenv("TASK_FILE"))
+	}
+	taskFile = ResolveTaskFilePath(taskFile)
+	log.Infof("机器人 @%s 发出的消息将写入: %s", bot.Self.UserName, taskFile)
 
 	// 存储用户的选择
 	userSelections := make(map[int64][]string)
@@ -30,8 +35,6 @@ func TgRobot(config Conf) {
 	u.Timeout = 60             //60秒内没有消息更新，就停止轮询，以节约资源
 	//u.Offset = -1              // 跳过旧的更新
 
-	//启动一个定时器 计算到下班还有多长时间
-	go StartTimer(bot, config)
 	// 获取一个监听管道，进行轮询监听飞机消息
 	updates := bot.GetUpdatesChan(u)
 	for update := range updates {
@@ -41,6 +44,13 @@ func TgRobot(config Conf) {
 		// 打印收到的消息
 		if update.Message != nil {
 			log.Infof("收到消息==>[userName=%s/From.String=%s/ID=%d] [消息是=%s}] [Chat.ID=%v] ", update.Message.From.UserName, update.Message.From.String(), update.Message.From.ID, update.Message.Text, update.Message.Chat.ID) //如果没有设置userName,From.String()可以取到name
+
+			// 若群里出现该机器人发出的消息（非本进程 Send 触发时），也一并记录
+			if update.Message.From != nil && update.Message.From.IsBot &&
+				strings.EqualFold(update.Message.From.UserName, bot.Self.UserName) &&
+				update.Message.Text != "" {
+				recordBotOutgoing(taskFile, bot.Self.UserName, update.Message.Text)
+			}
 		}
 
 		if update.CallbackQuery != nil { // 用户点击按钮
@@ -53,10 +63,10 @@ func TgRobot(config Conf) {
 				selection := userSelections[chatID]
 				if len(selection) == 0 {
 					reply := "你未选择任何选项！"
-					bot.Send(tgbotapi.NewMessage(chatID, reply))
+					sendBotMessage(bot, taskFile, bot.Self.UserName, tgbotapi.NewMessage(chatID, reply))
 				} else {
 					reply := fmt.Sprintf("你选择了: %s", strings.Join(selection, ", "))
-					bot.Send(tgbotapi.NewMessage(chatID, reply))
+					sendBotMessage(bot, taskFile, bot.Self.UserName, tgbotapi.NewMessage(chatID, reply))
 				}
 				userSelections[chatID] = nil // 清空用户选择
 			} else { // 记录选择
@@ -91,7 +101,7 @@ func TgRobot(config Conf) {
 				reply := tgbotapi.NewMessage(chatID, "请选择选项：")
 				reply.ReplyMarkup = keyboard
 
-				_, err = bot.Send(reply)
+				_, err = sendBotMessage(bot, taskFile, bot.Self.UserName, reply)
 				if err != nil {
 					panic(err)
 				}
@@ -107,37 +117,24 @@ func TgRobot(config Conf) {
 			msg := tgbotapi.NewMessage(config.TgBot.ChatID, responseText)
 			switch update.Message.Command() {
 			case "start":
-				msg.Text = "请输入1到100之间的数字 \n例如输入 /1"
+				msg.Text = "你好，发送 /help 查看可用命令"
 			case "help":
 				msg.Text = "You can control me by sending these commands:\n/start - to start the bot\n/help - to get this help message"
 			default:
-				if IsNumber(update.Message.Command()) {
-					number, _ := strconv.Atoi(update.Message.Command())
-					if number >= 1 && number <= 100 {
-						duration := GetDuration(config.TgBot.Hour, config.TgBot.Min, config.TgBot.Sec)
-						hour := duration / time.Hour
-						mine := duration / time.Minute % 60
-						second := duration / time.Second % 60
-						msg.Text = fmt.Sprintf("下班倒计时: 还剩%d小时%d分钟%d秒", hour, mine, second)
-					} else {
-						msg.Text = "数字太大，我还在学习"
-					}
+				if strings.Contains(update.Message.Text, "@"+bot.Self.UserName+" ") { //@我的(机器人)
+					msg.Text = "不要@我，我很忙..."
 				} else {
-					if strings.Contains(update.Message.Text, "@bx_xia_Bot ") { //@我的(机器人)
-						msg.Text = "不要@我，我很忙..."
-					} else {
-						msg.Text = "请重新输入..."
-					}
+					msg.Text = "请重新输入..."
 				}
 			}
 			//msg.ReplyToMessageID = update.Message.MessageID  加这个是回复消息
 			// 发送回复消息
-			bot.Send(msg)
+			sendBotMessage(bot, taskFile, bot.Self.UserName, msg)
 		} else {
 			//如果是#号开头，就是我要发到群里的消息
 			if update.Message != nil && strings.HasPrefix(update.Message.Text, "#") {
-				msg.Text = update.Message.Text
-				bot.Send(msg)
+				msg := tgbotapi.NewMessage(config.TgBot.ChatID, update.Message.Text)
+				sendBotMessage(bot, taskFile, bot.Self.UserName, msg)
 			}
 		}
 
