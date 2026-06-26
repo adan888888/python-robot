@@ -23,7 +23,7 @@ type Conf struct {
 		ApiID       int    `yaml:"apiId"`
 		ApiHash     string `yaml:"apiHash"`
 		Phone       string `yaml:"phone"`
-		WatchBot    string `yaml:"watchBot"`
+		GroupName   string `yaml:"groupName"`
 		GroupChatID int64  `yaml:"groupChatId"`
 		TaskFile    string `yaml:"taskFile"`
 		Session     string `yaml:"session"`

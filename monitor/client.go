@@ -10,12 +10,12 @@ import (
 
 	"github.com/go-faster/errors"
 	"github.com/gotd/contrib/auth/terminal"
+	"github.com/gotd/log/logzap"
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
 	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/telegram/updates"
 	"github.com/gotd/td/tg"
-	"github.com/gotd/log/logzap"
 	"go.uber.org/zap"
 
 	"testDockerTgbot/rebot"
@@ -26,9 +26,9 @@ func Run(conf rebot.Conf) error {
 		return errors.New("请在 config.yaml 的 monitor 段填写 apiId 和 apiHash（https://my.telegram.org/apps）")
 	}
 
-	watchBot := strings.TrimPrefix(strings.TrimSpace(conf.Monitor.WatchBot), "@")
-	if watchBot == "" {
-		watchBot = "toki999999_bot"
+	groupName := strings.TrimSpace(conf.Monitor.GroupName)
+	if groupName == "" && conf.Monitor.GroupChatID == 0 {
+		return errors.New("请在 config.yaml 的 monitor 段填写 groupName 或 groupChatId")
 	}
 
 	taskFile := rebot.ResolveTaskFilePath(conf.TaskFilePath())
@@ -48,7 +48,7 @@ func Run(conf rebot.Conf) error {
 
 	tdLog := logzap.New(log)
 	log.Info("监听配置",
-		zap.String("watchBot", watchBot),
+		zap.String("groupName", groupName),
 		zap.Int64("groupChatId", conf.Monitor.GroupChatID),
 		zap.String("taskFile", taskFile),
 		zap.String("session", sessionPath),
@@ -69,20 +69,14 @@ func Run(conf rebot.Conf) error {
 		UpdateHandler:  gaps,
 	})
 
+	targetChatID := conf.Monitor.GroupChatID
+
 	handleMessage := func(ctx context.Context, entities tg.Entities, msg tg.MessageClass) error {
 		m, ok := msg.(*tg.Message)
 		if !ok {
 			return nil
 		}
-		if conf.Monitor.GroupChatID != 0 && !peerMatchesChatID(m.PeerID, conf.Monitor.GroupChatID) {
-			return nil
-		}
-
-		sender, ok := resolveSender(entities, m)
-		if !ok || !sender.Bot {
-			return nil
-		}
-		if !strings.EqualFold(sender.Username, watchBot) {
+		if !matchesTargetGroup(entities, m.PeerID, groupName, targetChatID) {
 			return nil
 		}
 
@@ -91,12 +85,12 @@ func Run(conf rebot.Conf) error {
 			text = "[非文本消息]"
 		}
 
-		senderName := "@" + sender.Username
+		senderName := formatSender(entities, m)
 		if err := rebot.AppendTaskMessage(taskFile, senderName, text); err != nil {
 			log.Error("写入工作任务文件失败", zap.Error(err))
 			return nil
 		}
-		log.Info("已记录机器人消息", zap.String("from", senderName), zap.String("text", text))
+		log.Info("已记录群消息", zap.String("group", groupName), zap.String("from", senderName), zap.String("text", text))
 		return nil
 	}
 
@@ -119,11 +113,20 @@ func Run(conf rebot.Conf) error {
 			return errors.Wrap(err, "get self")
 		}
 
+		if groupName != "" && targetChatID == 0 {
+			id, err := findGroupChatIDByTitle(ctx, client.API(), groupName)
+			if err != nil {
+				return errors.Wrap(err, "find group by name")
+			}
+			targetChatID = id
+			log.Info("已解析群聊 ID", zap.String("groupName", groupName), zap.Int64("groupChatId", targetChatID))
+		}
+
 		name := self.FirstName
 		if self.Username != "" {
 			name = fmt.Sprintf("%s (@%s)", name, self.Username)
 		}
-		log.Info("个人账号已登录，开始监听群里机器人消息", zap.String("user", name))
+		log.Info("个人账号已登录，开始监听群消息", zap.String("user", name), zap.String("group", groupName))
 
 		return gaps.Run(ctx, client.API(), self.ID, updates.AuthOptions{
 			OnStart: func(ctx context.Context) {
@@ -131,6 +134,57 @@ func Run(conf rebot.Conf) error {
 			},
 		})
 	})
+}
+
+func findGroupChatIDByTitle(ctx context.Context, api *tg.Client, title string) (int64, error) {
+	result, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
+		OffsetPeer: &tg.InputPeerEmpty{},
+		Limit:      100,
+	})
+	if err != nil {
+		return 0, err
+	}
+
+	modified, ok := result.AsModified()
+	if !ok {
+		return 0, errors.Errorf("未找到名为 %q 的群，请确认个人账号已加入该群", title)
+	}
+
+	for _, chat := range modified.GetChats() {
+		switch c := chat.(type) {
+		case *tg.Chat:
+			if strings.EqualFold(c.Title, title) {
+				return -int64(c.ID), nil
+			}
+		case *tg.Channel:
+			if strings.EqualFold(c.Title, title) {
+				return -(1_000_000_000_000 + c.ID), nil
+			}
+		}
+	}
+
+	return 0, errors.Errorf("未找到名为 %q 的群，请确认个人账号已加入该群", title)
+}
+
+func formatSender(entities tg.Entities, m *tg.Message) string {
+	if sender, ok := resolveSender(entities, m); ok {
+		if sender.Bot && sender.Username != "" {
+			return "@" + sender.Username
+		}
+		if sender.Username != "" {
+			return "@" + sender.Username
+		}
+		name := strings.TrimSpace(sender.FirstName + " " + sender.LastName)
+		if name != "" {
+			return name
+		}
+	}
+
+	if author, ok := m.GetPostAuthor(); ok && author != "" {
+		return author
+	}
+
+	return "unknown"
 }
 
 func resolveSender(entities tg.Entities, m *tg.Message) (*tg.User, bool) {
@@ -149,10 +203,37 @@ func resolveSender(entities tg.Entities, m *tg.Message) (*tg.User, bool) {
 	return user, true
 }
 
-func peerMatchesChatID(peer tg.PeerClass, want int64) bool {
-	if want == 0 {
+func matchesTargetGroup(entities tg.Entities, peer tg.PeerClass, groupName string, groupChatID int64) bool {
+	if groupChatID != 0 {
+		return peerMatchesChatID(peer, groupChatID)
+	}
+	if groupName == "" {
 		return true
 	}
+	title, ok := chatTitleFromPeer(entities, peer)
+	return ok && strings.EqualFold(title, groupName)
+}
+
+func chatTitleFromPeer(entities tg.Entities, peer tg.PeerClass) (string, bool) {
+	switch p := peer.(type) {
+	case *tg.PeerChat:
+		chat, ok := entities.Chats[p.ChatID]
+		if !ok {
+			return "", false
+		}
+		return chat.Title, true
+	case *tg.PeerChannel:
+		channel, ok := entities.Channels[p.ChannelID]
+		if !ok {
+			return "", false
+		}
+		return channel.Title, true
+	default:
+		return "", false
+	}
+}
+
+func peerMatchesChatID(peer tg.PeerClass, want int64) bool {
 	got, ok := botAPIChatID(peer)
 	if !ok {
 		return false
