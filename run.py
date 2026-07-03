@@ -15,7 +15,9 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(message)s",
 )
-logging.getLogger("telethon").setLevel(logging.WARNING)
+# 屏蔽 Telethon 同步频道更新时的 INFO 日志（如 "Got difference for channel ... updates"）
+for _name in ("telethon", "telethon.client", "telethon.client.updates"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 
